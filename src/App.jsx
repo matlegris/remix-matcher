@@ -200,7 +200,7 @@ function AnchorCard({ song }) {
 }
 
 // A single match row — just the "other" track
-function MatchRow({ match, anchor, selected, onClick, onNavigate }) {
+function MatchRow({ match, anchor, selected, onClick, onNavigate, onArtistFilter }) {
   const other = match.a.song === anchor?.song ? match.b : match.a;
   const { bpmDiff, keyMatch, bpmMatch } = match;
   return (
@@ -231,7 +231,19 @@ function MatchRow({ match, anchor, selected, onClick, onNavigate }) {
           onMouseEnter={e => { e.currentTarget.style.color = '#00c266'; e.currentTarget.style.textDecoration = 'underline'; }}
           onMouseLeave={e => { e.currentTarget.style.color = '#f0f0f0'; e.currentTarget.style.textDecoration = 'none'; }}
         >{other.song}</div>
-        <div style={{ fontSize: 11, color: '#666', marginTop: 2 }}>{other.artist}</div>
+        <div style={{ marginTop: 2, display: 'flex', flexWrap: 'wrap', gap: '0 4px' }}>
+          {other.artist.split(/;\s*|,\s+(?=[A-Z])/).map((a, ai, arr) => (
+            <span key={ai} style={{ display: 'inline-flex', alignItems: 'center', gap: 2 }}>
+              <span
+                onClick={onArtistFilter ? e => { e.stopPropagation(); onArtistFilter(a.trim()); } : undefined}
+                style={{ fontSize: 11, color: '#666', cursor: onArtistFilter ? 'pointer' : 'default' }}
+                onMouseEnter={onArtistFilter ? e => { e.currentTarget.style.textDecoration = 'underline'; e.currentTarget.style.color = '#00c266'; } : undefined}
+                onMouseLeave={onArtistFilter ? e => { e.currentTarget.style.textDecoration = 'none'; e.currentTarget.style.color = '#666'; } : undefined}
+              >{a.trim()}</span>
+              {ai < arr.length - 1 && <span style={{ fontSize: 11, color: '#333' }}>,</span>}
+            </span>
+          ))}
+        </div>
         <div style={{ marginTop: 4, display: 'flex', gap: 6, alignItems: 'center' }}>
           <span style={{ fontSize: 11, color: '#888', fontFamily: 'monospace' }}>{other.bpm} BPM</span>
           <KeyBadge keyName={other.key} />
@@ -239,7 +251,7 @@ function MatchRow({ match, anchor, selected, onClick, onNavigate }) {
         </div>
       </div>
       <div style={{ textAlign: 'center', cursor: 'pointer' }} onClick={onClick}>
-        <div style={{ fontSize: 13, color: bpmDiff === 0 ? '#00c266' : bpmDiff < 4 ? '#00c266' : bpmDiff < 8 ? '#f5a623' : '#aaa', fontFamily: 'monospace', fontWeight: 700 }}>
+        <div style={{ fontSize: 13, color: '#00c266', fontFamily: 'monospace', fontWeight: 700 }}>
           {bpmDiff % 1 === 0 ? String(Math.round(bpmDiff)) : bpmDiff.toFixed(1)}
         </div>
       </div>
@@ -292,8 +304,17 @@ export default function RemixMatcher() {
   const [history, setHistory] = useState([]);
   const [songSort, setSongSort] = useState({ key: 'az', dir: 'asc' });
   const [matchSort, setMatchSort] = useState({ key: 'bpm', dir: 'asc' });
-  const [keyFilter, setKeyFilter] = useState(null);
+  const [keyFilters, setKeyFilters] = useState(new Set());
+  const [azPickerOpen, setAzPickerOpen] = useState(false);
+  const [bpmPickerOpen, setBpmPickerOpen] = useState(false);
+  const [bpmFilterVal, setBpmFilterVal] = useState('');
+  const bpmPickerRef = useRef();
+  const [azSortTarget, setAzSortTarget] = useState('song'); // 'song' | 'artist'
+  const azPickerRef = useRef();
   const [keyPickerOpen, setKeyPickerOpen] = useState(false);
+  const [artistFilter, setArtistFilter] = useState(null);
+  const [fileNames, setFileNames] = useState([]);
+  const [toleranceInput, setToleranceInput] = useState('10');
   const [isDragging, setIsDragging] = useState(false);
   const [fileName, setFileName] = useState('');
   const fileRef = useRef();
@@ -330,6 +351,7 @@ export default function RemixMatcher() {
       return merged;
     });
     setFileName(name);
+    setFileNames(prev => replace ? [name] : [...prev.filter(n => n !== name), name]);
     setSelectedSong(null);
     setSelectedMatch(null);
   }, [allowRelative, recompute]);
@@ -349,8 +371,9 @@ export default function RemixMatcher() {
   }, [handleFile]);
 
   const handleTolerance = useCallback((val) => {
-    const n = Math.max(1, Math.min(50, val));
+    const n = Math.max(0, Math.min(50, val));
     setTolerance(n);
+    setToleranceInput(String(n));
     setSongs(prev => { recompute(prev, n, allowRelative); return prev; });
   }, [allowRelative, recompute]);
 
@@ -394,6 +417,17 @@ export default function RemixMatcher() {
     }
   }, [selectedSong]);
 
+  // Close pickers on outside click
+  useEffect(() => {
+    const handler = e => {
+      if (keyPickerRef.current && !keyPickerRef.current.contains(e.target)) setKeyPickerOpen(false);
+      if (azPickerRef.current && !azPickerRef.current.contains(e.target)) setAzPickerOpen(false);
+      if (bpmPickerRef.current && !bpmPickerRef.current.contains(e.target)) setBpmPickerOpen(false);
+    };
+    document.addEventListener('mousedown', handler);
+    return () => document.removeEventListener('mousedown', handler);
+  }, []);
+
   // Sort helper
   const toggleSort = (current, key, setter) => {
     if (current.key === key) {
@@ -407,11 +441,22 @@ export default function RemixMatcher() {
   const allKeys = [...new Set(songs.map(s => s.key))].sort((a, b) => a.localeCompare(b));
   const filteredSongs = songs
     .map((s, i) => ({ ...s, _idx: i }))
-    .filter(s => (!searchTerm || s.song.toLowerCase().includes(searchTerm.toLowerCase()) || s.artist.toLowerCase().includes(searchTerm.toLowerCase())) && (!keyFilter || s.key === keyFilter))
+    .filter(s => (!searchTerm || s.song.toLowerCase().includes(searchTerm.toLowerCase()) || s.artist.toLowerCase().includes(searchTerm.toLowerCase())) && (keyFilters.size === 0 || keyFilters.has(s.key)) && (!bpmFilterVal || Math.abs(s.bpm - parseInt(bpmFilterVal)) <= tolerance))
     .sort((a, b) => {
+      // Artist filter pinning: matching artist floats to top
+      if (artistFilter) {
+        const aMatch = a.artist.split(/;\s*|,\s+(?=[A-Z])/).map(x => x.trim()).includes(artistFilter) ? 0 : 1;
+        const bMatch = b.artist.split(/;\s*|,\s+(?=[A-Z])/).map(x => x.trim()).includes(artistFilter) ? 0 : 1;
+        if (aMatch !== bMatch) return aMatch - bMatch;
+      }
       if (!songSort.key) return a._idx - b._idx; // original order
       let cmp = 0;
-      if (songSort.key === 'az') cmp = a.song.localeCompare(b.song);
+      if (songSort.key === 'az') {
+        const alpha = s => /^[a-zA-Z]/.test(s) ? 0 : 1;
+        const field = azSortTarget === 'artist' ? 'artist' : 'song';
+        const ap = alpha(a[field]), bp = alpha(b[field]);
+        if (ap !== bp) { cmp = ap - bp; } else { cmp = a[field].localeCompare(b[field], undefined, { sensitivity: 'base' }); }
+      }
       else if (songSort.key === 'bpm') cmp = a.bpm - b.bpm;
       else if (songSort.key === 'key') cmp = a.key.localeCompare(b.key);
       return songSort.dir === 'asc' ? cmp : -cmp;
@@ -469,84 +514,92 @@ export default function RemixMatcher() {
         background: '#0a0a0d',
       }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-          <div style={{
-            width: 32, height: 32,
-            background: 'linear-gradient(135deg, #00c266, #007a42)',
-            borderRadius: 8,
-            display: 'flex', alignItems: 'center', justifyContent: 'center',
-            fontSize: 16,
-          }}>♫</div>
+          <img src="data:image/png;base64,/9j/4AAQSkZJRgABAQAAAQABAAD/4gHYSUNDX1BST0ZJTEUAAQEAAAHIAAAAAAQwAABtbnRyUkdCIFhZWiAH4AABAAEAAAAAAABhY3NwAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAQAA9tYAAQAAAADTLQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAlkZXNjAAAA8AAAACRyWFlaAAABFAAAABRnWFlaAAABKAAAABRiWFlaAAABPAAAABR3dHB0AAABUAAAABRyVFJDAAABZAAAAChnVFJDAAABZAAAAChiVFJDAAABZAAAAChjcHJ0AAABjAAAADxtbHVjAAAAAAAAAAEAAAAMZW5VUwAAAAgAAAAcAHMAUgBHAEJYWVogAAAAAAAAb6IAADj1AAADkFhZWiAAAAAAAABimQAAt4UAABjaWFlaIAAAAAAAACSgAAAPhAAAts9YWVogAAAAAAAA9tYAAQAAAADTLXBhcmEAAAAAAAQAAAACZmYAAPKnAAANWQAAE9AAAApbAAAAAAAAAABtbHVjAAAAAAAAAAEAAAAMZW5VUwAAACAAAAAcAEcAbwBvAGcAbABlACAASQBuAGMALgAgADIAMAAxADb/2wBDAAUDBAQEAwUEBAQFBQUGBwwIBwcHBw8LCwkMEQ8SEhEPERETFhwXExQaFRERGCEYGh0dHx8fExciJCIeJBweHx7/2wBDAQUFBQcGBw4ICA4eFBEUHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh7/wAARCAKrBAADASIAAhEBAxEB/8QAHQABAAEEAwEAAAAAAAAAAAAAAAIBAwcIBAUGCf/EAEsQAQACAQMBBAcDCAYIBgEFAAABAgMEBREGBxIhMQgTQVFhcZEiMoEUFSNCUqGxwTNicpKT0RYXRVVjgoPhNUNGU1ZzGCQ0RFTC/8QAHAEBAAEFAQEAAAAAAAAAAAAAAAUBAgMEBgcI/8QAOBEBAAIBAgQDBQYFBQEBAQAAAAECAwQRBRIhMQZBURMyYXGRFBUiUqGxFjNCgdEjQ1PB4fAHYv/aAAwDAQACEQMRAD8A0yAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA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AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAP/Z" alt="logo" style={{ height: 36, width: 'auto', borderRadius: 6 }} />
           <div>
             <div style={{ fontSize: 15, fontWeight: 700, letterSpacing: -0.3 }}>Remix Matcher</div>
-            <div style={{ fontSize: 11, color: '#555', marginTop: -1 }}>Exportify Edition</div>
+
           </div>
         </div>
 
-        <div style={{ flex: 1 }} />
-
-        {/* BPM Tolerance — only shown when songs are loaded */}
-        {songs.length > 0 && <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-          <span style={{ fontSize: 12, color: '#666' }}>BPM Tolerance</span>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-            <button onClick={() => handleTolerance(tolerance - 1)} style={{ ...btnStyle, width: 24, height: 24, padding: 0 }}>−</button>
-            <div style={{
-              background: '#1a1a22', border: '1px solid #2a2a35',
-              borderRadius: 6, padding: '4px 12px',
-              fontSize: 14, fontWeight: 700, fontFamily: 'monospace',
-              color: '#00c266', minWidth: 42, textAlign: 'center',
-            }}>±{tolerance}</div>
-            <button onClick={() => handleTolerance(tolerance + 1)} style={{ ...btnStyle, width: 24, height: 24, padding: 0 }}>+</button>
-          </div>
-          <input
-            type="range" min={1} max={50} value={tolerance}
-            onChange={e => handleTolerance(parseInt(e.target.value))}
-            style={{ width: 90, accentColor: '#00c266' }}
-          />
-        </div>}
-
-        {/* Relative keys toggle — only shown when songs loaded */}
-        {songs.length > 0 &&
-        <div
-          onClick={() => handleRelative(!allowRelative)}
-          style={{
-            display: 'flex', alignItems: 'center', gap: 8,
-            cursor: 'pointer', padding: '6px 12px',
-            background: allowRelative ? '#00c26618' : '#1a1a22',
-            border: `1px solid ${allowRelative ? '#00c26644' : '#2a2a35'}`,
-            borderRadius: 6, transition: 'all 0.2s',
-          }}
-        >
-          <div style={{
-            width: 28, height: 16, borderRadius: 8,
-            background: allowRelative ? '#00c266' : '#333',
-            position: 'relative', transition: 'background 0.2s',
-          }}>
-            <div style={{
-              position: 'absolute', top: 2, left: allowRelative ? 14 : 2,
-              width: 12, height: 12, borderRadius: 6,
-              background: '#fff', transition: 'left 0.2s',
-            }} />
-          </div>
-          <span style={{ fontSize: 12, color: allowRelative ? '#00c266' : '#666' }}>Relative Keys</span>
-        </div>}
-
-        {/* Load buttons */}
-        <div style={{ display: 'flex', gap: 6 }}>
+        {/* Center: BPM tolerance */}
+        <div style={{ flex: 1, display: 'flex', justifyContent: 'center' }}>
           {songs.length > 0 && (
-            <button onClick={() => addFileRef.current.click()} style={{
-              ...btnStyle,
-              fontSize: 12,
-            }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+              <span style={{ fontSize: 11, color: '#555' }}>BPM Tolerance</span>
+              <button
+                onClick={() => handleTolerance(tolerance - 1)}
+                style={{ ...btnStyle, width: 24, height: 24, padding: 0, fontSize: 14 }}
+                onMouseEnter={e => { e.currentTarget.style.background = '#2a2a38'; e.currentTarget.style.color = '#fff'; e.currentTarget.style.borderColor = '#3a3a50'; }}
+                onMouseLeave={e => { e.currentTarget.style.background = '#1a1a22'; e.currentTarget.style.color = '#aaa'; e.currentTarget.style.borderColor = '#2a2a35'; }}
+              >−</button>
+              <input
+                value={toleranceInput}
+                onChange={e => setToleranceInput(e.target.value)}
+                onBlur={() => { const n = parseInt(toleranceInput); if (!isNaN(n) && n >= 0) handleTolerance(n); else setToleranceInput(String(tolerance)); }}
+                onKeyDown={e => { if (e.key === 'Enter') { const n = parseInt(toleranceInput); if (!isNaN(n)) handleTolerance(n); } }}
+                style={{
+                  background: '#1a1a22', border: '1px solid #2a2a35',
+                  borderRadius: 6, padding: '4px 0',
+                  fontSize: 14, fontWeight: 700, fontFamily: 'monospace',
+                  color: '#00c266', width: 48, textAlign: 'center',
+                  outline: 'none',
+                }}
+              />
+              <button
+                onClick={() => handleTolerance(tolerance + 1)}
+                style={{ ...btnStyle, width: 24, height: 24, padding: 0, fontSize: 14 }}
+                onMouseEnter={e => { e.currentTarget.style.background = '#2a2a38'; e.currentTarget.style.color = '#fff'; e.currentTarget.style.borderColor = '#3a3a50'; }}
+                onMouseLeave={e => { e.currentTarget.style.background = '#1a1a22'; e.currentTarget.style.color = '#aaa'; e.currentTarget.style.borderColor = '#2a2a35'; }}
+              >+</button>
+            </div>
+          )}
+        </div>
+
+        {/* Right: file names + load buttons */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+          {songs.length > 0 && fileNames.length > 0 && (
+            <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap', maxWidth: 300, alignItems: 'center' }}>
+              {fileNames.map((fn, i) => (
+                <span key={i} style={{
+                  fontSize: 10, color: '#555', background: '#1a1a22',
+                  border: '1px solid #2a2a35', borderRadius: 4,
+                  padding: '2px 4px 2px 7px', fontFamily: 'monospace',
+                  maxWidth: 140, display: 'inline-flex', alignItems: 'center', gap: 4,
+                  overflow: 'hidden', whiteSpace: 'nowrap',
+                }} title={fn}>
+                  <span style={{ overflow: 'hidden', textOverflow: 'ellipsis' }}>{fn}</span>
+                  <span
+                    onClick={() => {
+                      const newNames = fileNames.filter((_, j) => j !== i);
+                      setFileNames(newNames);
+                      // We can't fully remove songs by file since we don't track per-file
+                      // so just show a note — ideally we'd track per-file but that's a bigger refactor
+                      // For now, remove the name pill only (songs stay loaded)
+                    }}
+                    style={{
+                      cursor: 'pointer', color: '#444', fontSize: 11,
+                      flexShrink: 0, lineHeight: 1,
+                      padding: '0 2px',
+                    }}
+                    onMouseEnter={e => e.currentTarget.style.color = '#888'}
+                    onMouseLeave={e => e.currentTarget.style.color = '#444'}
+                    title="Remove from list"
+                  >×</span>
+                </span>
+              ))}
+            </div>
+          )}
+          {songs.length > 0 ? (
+            <button onClick={() => addFileRef.current.click()} style={{ ...btnStyle, fontSize: 12 }}>
               + Add More
             </button>
+          ) : (
+            <button onClick={() => fileRef.current.click()} style={{
+              ...btnStyle, background: '#00c266', color: '#000', fontWeight: 700, fontSize: 12,
+            }}>
+              Load CSV
+            </button>
           )}
-          <button onClick={() => fileRef.current.click()} style={{
-            ...btnStyle,
-            background: '#00c266', color: '#000',
-            fontWeight: 700, fontSize: 12,
-          }}>
-            Load CSV
-          </button>
         </div>
         <input ref={fileRef} type="file" accept=".csv" style={{ display: 'none' }}
           onChange={e => { handleFile(e.target.files[0]); fileRef.current.value = ''; }} />
@@ -554,19 +607,7 @@ export default function RemixMatcher() {
           onChange={e => {
             Array.from(e.target.files).forEach((file, idx) => {
               const reader = new FileReader();
-              reader.onload = ev => {
-                const rows = parseCSV(ev.target.result);
-                const processed = processCSV(rows);
-                setSongs(prev => {
-                  const merged = [...prev, ...processed].reduce((acc, s) => {
-                    const key = `${s.song}|||${s.artist}`;
-                    if (!acc.map[key]) { acc.map[key] = true; acc.list.push(s); }
-                    return acc;
-                  }, { map: {}, list: [] }).list;
-                  recompute(merged, toleranceRef.current, allowRelative);
-                  return merged;
-                });
-              };
+              reader.onload = ev => { loadSongs(ev.target.result, file.name, false); };
               reader.readAsText(file);
             });
             addFileRef.current.value = '';
@@ -578,14 +619,14 @@ export default function RemixMatcher() {
 
         {/* Left: Song list — hidden when empty */}
         {songs.length > 0 && <div style={{
-          width: 280, minWidth: 220,
+          width: 340, minWidth: 300,
           borderRight: '1px solid #1a1a22',
           display: 'flex', flexDirection: 'column',
           background: '#0a0a0d',
         }}>
           <div style={{ padding: '12px 14px', borderBottom: '1px solid #1a1a22' }}>
             <input
-              placeholder="Search songs…"
+              placeholder="Search songs or artist…"
               value={searchTerm}
               onChange={e => setSearchTerm(e.target.value)}
               style={{
@@ -606,153 +647,244 @@ export default function RemixMatcher() {
                   ← back
                 </button>
               )}
-              {selectedSong && (
-                <button onClick={clearSelection}
-                  style={{ ...btnStyle, fontSize: 10, padding: '3px 8px', color: '#666' }}>
-                  show all
-                </button>
-              )}
+
             </div>
           </div>
           {songs.length > 0 && (
             <div style={{
-              display: 'flex', gap: 4, padding: '5px 14px',
+              display: 'grid', gridTemplateColumns: '1fr 60px 90px',
+              padding: '4px 14px',
               borderBottom: '1px solid #1a1a22',
               background: '#080810',
               fontSize: 10, textTransform: 'uppercase', letterSpacing: 0.8,
               alignItems: 'center', position: 'relative',
             }}>
-              {[['az','A–Z'],['bpm','BPM'],['key','Key']].map(([k, label]) => {
-                const active = songSort.key === k;
-                const isKeySort = k === 'key';
-                // For key sort: ↓ = A→G (asc), ↑ = G→A (desc) — inverted display
-                const arrow = active
-                  ? (isKeySort ? (songSort.dir === 'asc' ? '↓' : '↑') : (songSort.dir === 'asc' ? '↑' : '↓'))
-                  : '↕';
+              {/* LEFT: A-Z with song/artist popup */}
+              {(() => {
+                const active = songSort.key === 'az';
+                const arrow = active ? (songSort.dir === 'asc' ? '↓' : '↑') : '↕';
                 return (
-                  <div key={k} style={{
-                    display: 'flex', alignItems: 'center',
-                    background: active ? '#00c26618' : 'transparent',
-                    border: `1px solid ${active ? '#00c26640' : '#1e1e28'}`,
-                    borderRadius: 4, overflow: 'hidden',
-                    transition: 'all 0.15s',
-                  }}>
-                    {/* Label: click to activate/deactivate */}
-                    <span
-                      onClick={() => {
-                        if (active) {
-                          setSongSort({ key: null, dir: 'asc' }); // deactivate
-                        } else {
-                          setSongSort({ key: k, dir: 'asc' }); // activate
-                        }
-                      }}
-                      style={{
-                        padding: '2px 6px 2px 8px',
-                        color: active ? '#00c266' : '#444',
-                        cursor: 'pointer', fontSize: 10,
-                        userSelect: 'none',
-                      }}
-                    >{label}</span>
-                    {/* Arrow: click to cycle direction (only when active) */}
-                    <span
-                      onClick={() => {
-                        if (active) {
-                          setSongSort(prev => ({ ...prev, dir: prev.dir === 'asc' ? 'desc' : 'asc' }));
-                        } else {
-                          setSongSort({ key: k, dir: 'asc' });
-                        }
-                      }}
-                      style={{
-                        padding: '2px 6px 2px 2px',
-                        color: active ? '#00c266' : '#333',
-                        cursor: 'pointer', fontSize: 10,
-                        opacity: active ? 1 : 0.3,
-                        userSelect: 'none',
-                      }}
-                    >{arrow}</span>
+                  <div ref={azPickerRef} style={{ position: 'relative', justifySelf: 'start' }}>
+                    <div style={{
+                      display: 'flex', alignItems: 'center',
+                      background: active ? '#00c26618' : 'transparent',
+                      border: `1px solid ${active ? '#00c26640' : '#1e1e28'}`,
+                      borderRadius: 4, overflow: 'hidden', transition: 'all 0.15s',
+                    }}>
+                      <span
+                        onClick={() => setAzPickerOpen(o => !o)}
+                        style={{ padding: '2px 4px 2px 8px', color: active ? '#00c266' : '#444', cursor: 'pointer', fontSize: 10, userSelect: 'none' }}
+                      >A–Z</span>
+                      <span
+                        onClick={() => {
+                          if (!active) { setSongSort({ key: 'az', dir: 'asc' }); return; }
+                          if (songSort.dir === 'asc') { setSongSort({ key: 'az', dir: 'desc' }); return; }
+                          setSongSort({ key: null, dir: 'asc' }); // 3rd click = off
+                        }}
+                        style={{ padding: '2px 6px 2px 2px', color: active ? '#00c266' : '#666', cursor: 'pointer', fontSize: 10, opacity: active ? 1 : 0.7, userSelect: 'none' }}
+                      >{arrow}</span>
+                    </div>
+                    {azPickerOpen && (
+                      <div style={{
+                        position: 'absolute', top: '100%', left: 0, marginTop: 4,
+                        background: '#13131e', border: '1px solid #2a2a38',
+                        borderRadius: 8, padding: 6, zIndex: 100,
+                        width: 130, boxShadow: '0 8px 32px #00000080',
+                      }}>
+                        <div style={{ fontSize: 10, color: '#444', padding: '3px 10px 6px', textTransform: 'uppercase', letterSpacing: 0.8 }}>Sort by</div>
+                        {[['song','Song name'],['artist','Artist name']].map(([val, lbl]) => {
+                          const checked = azSortTarget === val;
+                          return (
+                            <div
+                              key={val}
+                              onClick={() => { setAzSortTarget(val); setSongSort({ key: 'az', dir: 'asc' }); setAzPickerOpen(false); }}
+                              style={{
+                                padding: '5px 10px', borderRadius: 4, cursor: 'pointer',
+                                fontSize: 11, display: 'flex', alignItems: 'center', gap: 8,
+                                background: checked ? '#00c26618' : 'transparent',
+                                color: checked ? '#00c266' : '#888',
+                                fontWeight: checked ? 600 : 400,
+                              }}
+                              onMouseEnter={e => { if (!checked) e.currentTarget.style.background = '#ffffff08'; }}
+                              onMouseLeave={e => { if (!checked) e.currentTarget.style.background = 'transparent'; }}
+                            >
+                              <span style={{
+                                width: 12, height: 12, borderRadius: '50%', flexShrink: 0,
+                                border: `2px solid ${checked ? '#00c266' : '#444'}`,
+                                background: 'transparent',
+                                display: 'flex', alignItems: 'center', justifyContent: 'center',
+                              }}>
+                                {checked && <span style={{ width: 6, height: 6, borderRadius: '50%', background: '#00c266', display: 'block' }} />}
+                              </span>
+                              {lbl}
+                            </div>
+                          );
+                        })}
+                      </div>
+                    )}
                   </div>
                 );
-              })}
-              {/* Key filter picker */}
-              <div ref={keyPickerRef} style={{ marginLeft: 'auto', position: 'relative' }}>
+              })()}
+
+              {/* CENTER: BPM sort + filter popup */}
+              {(() => {
+                const active = songSort.key === 'bpm';
+                const hasFilter = bpmFilterVal !== '';
+                const arrow = active ? (songSort.dir === 'asc' ? '↑' : '↓') : '↕';
+                return (
+                  <div ref={bpmPickerRef} style={{ justifySelf: 'center', display: 'flex', justifyContent: 'center', position: 'relative' }}>
+                    <div style={{
+                      display: 'flex', alignItems: 'center',
+                      background: (active || hasFilter) ? '#00c26618' : 'transparent',
+                      border: `1px solid ${(active || hasFilter) ? '#00c26640' : '#1e1e28'}`,
+                      borderRadius: 4, overflow: 'hidden', transition: 'all 0.15s',
+                    }}>
+                      <span
+                        onClick={() => { if (hasFilter) { setBpmFilterVal(''); } else { setBpmPickerOpen(o => !o); } }}
+                        style={{ padding: '2px 4px 2px 8px', color: (active || hasFilter) ? '#00c266' : '#444', cursor: 'pointer', fontSize: 10, userSelect: 'none' }}
+                      >{hasFilter ? `${bpmFilterVal} BPM` : 'BPM'}</span>
+                      <span
+                        onClick={e => {
+                          e.stopPropagation();
+                          if (!active) { setSongSort({ key: 'bpm', dir: 'asc' }); return; }
+                          if (songSort.dir === 'asc') { setSongSort({ key: 'bpm', dir: 'desc' }); return; }
+                          setSongSort({ key: null, dir: 'asc' }); // 3rd click = off
+                        }}
+                        style={{ padding: '2px 6px 2px 2px', color: (active || hasFilter) ? '#00c266' : '#666', cursor: 'pointer', fontSize: 10, opacity: (active || hasFilter) ? 1 : 0.7, userSelect: 'none' }}
+                      >{arrow}</span>
+                    </div>
+                    {bpmPickerOpen && (
+                      <div style={{
+                        position: 'absolute', top: '100%', left: '50%', transform: 'translateX(-50%)', marginTop: 4,
+                        background: '#13131e', border: '1px solid #2a2a38',
+                        borderRadius: 8, padding: 10, zIndex: 100,
+                        width: 150, boxShadow: '0 8px 32px #00000080', boxSizing: 'border-box',
+                      }}>
+                        <div style={{ fontSize: 10, color: '#444', textTransform: 'uppercase', letterSpacing: 0.8, marginBottom: 8 }}>Filter by BPM</div>
+                        <div style={{ fontSize: 10, color: '#555', marginBottom: 8, lineHeight: 1.4 }}>Enter a target BPM</div>
+                        <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+                          <input
+                            type="number"
+                            placeholder=""
+                            value={bpmFilterVal}
+                            onChange={e => setBpmFilterVal(e.target.value)}
+                            onKeyDown={e => { if (e.key === 'Enter') setBpmPickerOpen(false); if (e.key === 'Escape') { setBpmFilterVal(''); setBpmPickerOpen(false); } }}
+                            autoFocus
+                            style={{
+                              flex: 1, background: '#1a1a22', border: '1px solid #2a2a35',
+                              borderRadius: 4, padding: '5px 8px', color: '#e8e8ea',
+                              fontSize: 12, outline: 'none', fontFamily: 'monospace',
+                              MozAppearance: 'textfield', width: '100%', boxSizing: 'border-box',
+                            }}
+                          />
+                          {bpmFilterVal && (
+                            <span onClick={() => { setBpmFilterVal(''); setBpmPickerOpen(false); }} style={{ cursor: 'pointer', color: '#555', fontSize: 14, padding: '0 2px' }}
+                              onMouseEnter={e => e.currentTarget.style.color = '#888'}
+                              onMouseLeave={e => e.currentTarget.style.color = '#555'}
+                            >×</span>
+                          )}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                );
+              })()}
+              {/* RIGHT: Unified Key button: sort + filter */}
+              <div ref={keyPickerRef} style={{ justifySelf: 'start', display: 'flex', justifyContent: 'flex-start', position: 'relative' }}>
                 <div
                   style={{
                     display: 'flex', alignItems: 'center',
-                    background: keyFilter ? '#00c26618' : 'transparent',
-                    border: `1px solid ${keyFilter ? '#00c26640' : '#1e1e28'}`,
-                    borderRadius: 4, overflow: 'hidden',
-                    transition: 'all 0.15s',
+                    background: (songSort.key === 'key' || keyFilters.size > 0) ? '#00c26618' : 'transparent',
+                    border: `1px solid ${(songSort.key === 'key' || keyFilters.size > 0) ? '#00c26640' : '#1e1e28'}`,
+                    borderRadius: 4, overflow: 'hidden', transition: 'all 0.15s',
                   }}
                 >
+                  {/* Label: click to open picker */}
                   <span
                     onClick={() => setKeyPickerOpen(o => !o)}
                     style={{
                       padding: '2px 4px 2px 8px',
-                      color: keyFilter ? '#00c266' : '#444',
+                      color: (songSort.key === 'key' || keyFilters.size > 0) ? '#00c266' : '#444',
                       cursor: 'pointer', fontSize: 10,
-                      textTransform: 'uppercase', letterSpacing: 0.8,
-                      userSelect: 'none',
+                      textTransform: 'uppercase', letterSpacing: 0.8, userSelect: 'none',
                     }}
-                  >{keyFilter ? keyFilter : 'Filter Key'}</span>
+                  >Key</span>
+                  {/* Arrow: cycles sort asc→desc→off. ↓=A→G, ↑=G→A */}
                   <span
-                    onClick={(e) => {
+                    onClick={e => {
                       e.stopPropagation();
-                      if (keyFilter) {
-                        setKeyFilter(null);
-                      } else {
-                        setKeyPickerOpen(o => !o);
-                      }
+                      setSongSort(prev => {
+                        if (prev.key !== 'key') return { key: 'key', dir: 'asc' };
+                        if (prev.dir === 'asc') return { key: 'key', dir: 'desc' };
+                        return { key: null, dir: 'asc' }; // third click = deactivate
+                      });
                     }}
                     style={{
                       padding: '2px 8px 2px 2px',
-                      color: keyFilter ? '#00c266' : '#333',
+                      color: songSort.key === 'key' ? '#00c266' : (keyFilters.size > 0 ? '#00c266' : '#666'),
                       cursor: 'pointer', fontSize: 10,
-                      opacity: keyFilter ? 1 : 0.4,
+                      opacity: (songSort.key === 'key' || keyFilters.size > 0) ? 1 : 0.7,
                       userSelect: 'none',
                     }}
-                  >{keyFilter ? '×' : '▾'}</span>
+                  >{songSort.key === 'key' ? (songSort.dir === 'asc' ? '↓' : '↑') : '↕'}</span>
                 </div>
                 {keyPickerOpen && (
                   <div style={{
                     position: 'absolute', top: '100%', right: 0, marginTop: 4,
                     background: '#13131e', border: '1px solid #2a2a38',
                     borderRadius: 8, padding: 6, zIndex: 100,
-                    maxHeight: 260, overflowY: 'auto', width: 130,
+                    maxHeight: 280, overflowY: 'auto', width: 150,
                     boxShadow: '0 8px 32px #00000080',
                   }}>
                     <div
-                      onClick={() => { setKeyFilter(null); setKeyPickerOpen(false); }}
+                      onClick={() => setKeyFilters(new Set())}
                       style={{
                         padding: '5px 10px', borderRadius: 4, cursor: 'pointer',
-                        fontSize: 11, color: !keyFilter ? '#00c266' : '#888',
-                        background: !keyFilter ? '#00c26618' : 'transparent',
+                        fontSize: 11, color: keyFilters.size === 0 ? '#00c266' : '#888',
+                        background: keyFilters.size === 0 ? '#00c26618' : 'transparent',
                         marginBottom: 4, fontWeight: 600,
+                        display: 'flex', alignItems: 'center', gap: 8,
                       }}
-                    >All keys</div>
+                    >
+                      <span style={{
+                        width: 12, height: 12, borderRadius: 3, flexShrink: 0,
+                        border: `1px solid ${keyFilters.size === 0 ? '#00c266' : '#444'}`,
+                        background: keyFilters.size === 0 ? '#00c266' : 'transparent',
+                        display: 'flex', alignItems: 'center', justifyContent: 'center',
+                        fontSize: 9, color: '#000',
+                      }}>{keyFilters.size === 0 ? '✓' : ''}</span>
+                      All keys
+                    </div>
                     {allKeys.map(k => {
-                      const color = ({
-                        'C':'#FF6B6B','C#':'#FF8E53','D':'#FFA940','D#':'#FFD666',
-                        'E':'#BAE637','F':'#36CFC9','F#':'#40A9FF','G':'#597EF7',
-                        'G#':'#9254DE','A':'#C41D7F','A#':'#EB2F96','B':'#FF85C2',
-                        'A min':'#FF6B6B','A# min':'#FF8E53','B min':'#FFA940','C min':'#FFD666',
-                        'C# min':'#BAE637','D min':'#36CFC9','D# min':'#40A9FF','E min':'#597EF7',
-                        'F min':'#9254DE','F# min':'#C41D7F','G min':'#EB2F96','G# min':'#FF85C2',
-                      })[k] || '#888';
-                      const isActive = keyFilter === k;
+                      const color = KEY_COLORS[k] || '#888';
+                      const isActive = keyFilters.has(k);
                       return (
                         <div
                           key={k}
-                          onClick={() => { setKeyFilter(isActive ? null : k); setKeyPickerOpen(false); }}
+                          onClick={() => {
+                            setKeyFilters(prev => {
+                              const next = new Set(prev);
+                              if (next.has(k)) next.delete(k); else next.add(k);
+                              return next;
+                            });
+                          }}
                           style={{
                             padding: '5px 10px', borderRadius: 4, cursor: 'pointer',
-                            fontSize: 11, display: 'flex', alignItems: 'center', gap: 6,
-                            background: isActive ? color + '22' : 'transparent',
+                            fontSize: 11, display: 'flex', alignItems: 'center', gap: 8,
+                            background: isActive ? color + '18' : 'transparent',
                             color: isActive ? color : '#888',
-                            fontWeight: isActive ? 700 : 400,
+                            fontWeight: isActive ? 600 : 400,
                           }}
                           onMouseEnter={e => { if (!isActive) e.currentTarget.style.background = '#ffffff08'; }}
                           onMouseLeave={e => { if (!isActive) e.currentTarget.style.background = 'transparent'; }}
                         >
+                          <span style={{
+                            width: 12, height: 12, borderRadius: 3, flexShrink: 0,
+                            border: `1px solid ${isActive ? color : '#444'}`,
+                            background: isActive ? color : 'transparent',
+                            display: 'flex', alignItems: 'center', justifyContent: 'center',
+                            fontSize: 9, color: '#000',
+                          }}>{isActive ? '✓' : ''}</span>
                           <span style={{ width: 8, height: 8, borderRadius: 2, background: color, flexShrink: 0, display: 'inline-block' }} />
                           {k}
                         </div>
@@ -836,19 +968,38 @@ export default function RemixMatcher() {
                     onMouseEnter={e => { if (!isSelected) e.currentTarget.style.background = '#ffffff05'; }}
                     onMouseLeave={e => { if (!isSelected) e.currentTarget.style.background = 'transparent'; }}
                   >
-                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 6 }}>
+                    <div style={{ display: 'grid', gridTemplateColumns: '1fr 60px 90px', alignItems: 'center', gap: 0 }}>
+                      {/* LEFT: song + artist */}
                       <div style={{ minWidth: 0 }}>
-                        <div style={{ fontSize: 12, fontWeight: 500, color: isSelected ? '#00c266' : '#d0d0d8', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-                          {song.song}
-                        </div>
-                        <div style={{ fontSize: 10, color: '#555', marginTop: 1, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-                          {song.artist}
+                        <div
+                          onClick={() => { selectSong(song); }}
+                          style={{ fontSize: 12, fontWeight: 500, color: isSelected ? '#00c266' : '#d0d0d8', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', cursor: 'pointer', display: 'inline-block', maxWidth: '100%' }}
+                          onMouseEnter={e => { e.currentTarget.style.color = '#00c266'; e.currentTarget.style.textDecoration = 'underline'; }}
+                          onMouseLeave={e => { e.currentTarget.style.color = isSelected ? '#00c266' : '#d0d0d8'; e.currentTarget.style.textDecoration = 'none'; }}
+                        >{song.song}</div>
+                        <div style={{ marginTop: 1, overflow: 'hidden', display: 'flex', flexWrap: 'wrap', gap: '0 4px' }}>
+                          {song.artist.split(/;\s*|,\s+(?=[A-Z])/).map((a, ai, arr) => (
+                            <span key={ai} style={{ display: 'inline-flex', alignItems: 'center', gap: 2 }}>
+                              <span
+                                onClick={e => { e.stopPropagation(); setArtistFilter(prev => prev === a.trim() ? null : a.trim()); if (songListRef.current) songListRef.current.scrollTop = 0; }}
+                                style={{ fontSize: 10, color: artistFilter === a.trim() ? '#00c266' : '#555', cursor: 'pointer' }}
+                                onMouseEnter={e => { e.currentTarget.style.textDecoration = 'underline'; e.currentTarget.style.color = '#00c266'; }}
+                                onMouseLeave={e => { e.currentTarget.style.textDecoration = 'none'; e.currentTarget.style.color = artistFilter === a.trim() ? '#00c266' : '#555'; }}
+                              >{a.trim()}</span>
+                              {artistFilter === a.trim() && <span onClick={e => { e.stopPropagation(); setArtistFilter(null); }} style={{ fontSize: 10, color: '#00c266', cursor: 'pointer' }}>×</span>}
+                              {ai < arr.length - 1 && <span style={{ fontSize: 10, color: '#333' }}>,</span>}
+                            </span>
+                          ))}
                         </div>
                       </div>
-                      <div style={{ textAlign: 'right', flexShrink: 0 }}>
+                      {/* CENTER: BPM */}
+                      <div style={{ textAlign: 'center' }}>
+                        <div style={{ fontSize: 12, color: '#666', fontFamily: 'monospace', fontWeight: 600 }}>{song.bpm}</div>
+
+                      </div>
+                      {/* RIGHT: Key */}
+                      <div style={{ textAlign: 'left', paddingLeft: 0 }}>
                         <KeyBadge keyName={song.key} />
-                        <div style={{ fontSize: 10, color: '#555', marginTop: 3, fontFamily: 'monospace' }}>{song.bpm}</div>
-                        {count > 0 && <div style={{ fontSize: 10, color: '#00c26688', marginTop: 1 }}>{count}✓</div>}
                       </div>
                     </div>
                   </div>
@@ -862,17 +1013,23 @@ export default function RemixMatcher() {
         <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
           {/* Matches header — hidden when no songs */}
           {songs.length > 0 && <div style={{
-            padding: '12px 20px',
+            padding: '8px 20px',
             borderBottom: '1px solid #1a1a22',
-            display: 'flex', alignItems: 'center', gap: 16,
+            display: 'flex', alignItems: 'center', gap: 12,
             background: '#0c0c10',
           }}>
-            <div>
+            <div style={{ display: 'flex', alignItems: 'baseline', gap: 10 }}>
               <span style={{ fontSize: 14, fontWeight: 600, color: '#d0d0d8' }}>
                 {selectedSong ? `Matches for "${selectedSong.song}"` : 'All Matches'}
               </span>
-              <span style={{ fontSize: 11, color: '#555', marginLeft: 10 }}>
-                {displayedMatches.length} match{displayedMatches.length !== 1 ? 'es' : ''}
+              <span style={{
+                fontSize: 22, fontWeight: 800, fontFamily: 'monospace',
+                color: '#00c266', letterSpacing: -1,
+              }}>
+                {displayedMatches.length}
+              </span>
+              <span style={{ fontSize: 12, color: '#00c26688', fontWeight: 600 }}>
+                match{displayedMatches.length !== 1 ? 'es' : ''}
               </span>
             </div>
             <div style={{ flex: 1 }}>
@@ -888,16 +1045,31 @@ export default function RemixMatcher() {
                 }}
               />
             </div>
-            <div style={{ display: 'flex', gap: 12, fontSize: 11, color: '#555' }}>
-              <span style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
-                <span style={{ display: 'inline-block', width: 8, height: 8, borderRadius: 2, background: '#00c26622', border: '1px solid #00c26644' }}/>
-                exact key
-              </span>
-              <span style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
-                <span style={{ display: 'inline-block', width: 8, height: 8, borderRadius: 2, background: '#f5a62322', border: '1px solid #f5a62344' }}/>
-                relative key
-              </span>
+            {/* Relative keys toggle moved here */}
+            <div
+              onClick={() => handleRelative(!allowRelative)}
+              style={{
+                display: 'flex', alignItems: 'center', gap: 6,
+                cursor: 'pointer', padding: '4px 10px',
+                background: allowRelative ? '#00c26618' : '#1a1a22',
+                border: `1px solid ${allowRelative ? '#00c26644' : '#2a2a35'}`,
+                borderRadius: 6, transition: 'all 0.2s',
+              }}
+            >
+              <div style={{
+                width: 24, height: 14, borderRadius: 7,
+                background: allowRelative ? '#00c266' : '#333',
+                position: 'relative', transition: 'background 0.2s', flexShrink: 0,
+              }}>
+                <div style={{
+                  position: 'absolute', top: 2, left: allowRelative ? 12 : 2,
+                  width: 10, height: 10, borderRadius: 5,
+                  background: '#fff', transition: 'left 0.2s',
+                }} />
+              </div>
+              <span style={{ fontSize: 11, color: allowRelative ? '#00c266' : '#555', whiteSpace: 'nowrap' }}>Relative Keys</span>
             </div>
+
           </div>}
 
           {/* Column headers */}
@@ -911,7 +1083,7 @@ export default function RemixMatcher() {
               fontSize: 10, textTransform: 'uppercase',
             }}>
               <SortHeader label="Matching Track" sortKey="az" current={matchSort} onToggle={k => toggleSort(matchSort, k, setMatchSort)} />
-              <SortHeader label="BPM Diff" sortKey="bpm" current={matchSort} onToggle={k => toggleSort(matchSort, k, setMatchSort)} align="center" />
+              <SortHeader label="BPM Diff" sortKey="bpm" current={matchSort} onToggle={k => toggleSort(matchSort, k, setMatchSort)} align="center" invertArrow={true} />
               <SortHeader label="Key" sortKey="key" current={matchSort} onToggle={k => toggleSort(matchSort, k, setMatchSort)} align="right" />
             </div>
           )}
@@ -1043,6 +1215,7 @@ export default function RemixMatcher() {
                     selected={selectedMatch === i}
                     onClick={() => setSelectedMatch(selectedMatch === i ? null : i)}
                     onNavigate={selectSong}
+                    onArtistFilter={artist => { setArtistFilter(prev => prev === artist ? null : artist); if (songListRef.current) songListRef.current.scrollTop = 0; }}
                   />
                 ))}
               </>
